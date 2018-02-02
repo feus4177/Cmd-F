@@ -9,23 +9,16 @@
 import UIKit
 import AVFoundation
 import Photos
+import TesseractOCR
 
 
 class ViewController: UIViewController, AVCapturePhotoCaptureDelegate {
-    private var captureSession: AVCaptureSession!
-    private var capturePhotoOutput: AVCapturePhotoOutput!
-    private var photoSampleBuffer: CMSampleBuffer!
-    private var isCaptureSessionConfigured = false
-    private let sessionQueue = DispatchQueue(label: "session queue")
-
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        previewView.session = captureSession
-
         self.checkCameraAuthorization { authorized in
             if authorized {
-                self.captureSession = AVCaptureSession()
+                print("Cool")
             } else {
                 print("Permission to use camera denied.")
             }
@@ -37,42 +30,6 @@ class ViewController: UIViewController, AVCapturePhotoCaptureDelegate {
             } else {
                 print("Permissio to use library denied.")
             }
-        }
-    }
-
-    override func viewWillAppear(_ animated: Bool) {
-        super.viewWillAppear(animated)
-
-        if self.isCaptureSessionConfigured {
-            if !self.captureSession.isRunning {
-                self.captureSession.startRunning()
-            }
-        } else {
-            // First time: request camera access, configure capture session and start it.
-            self.checkCameraAuthorization({ authorized in
-                guard authorized else {
-                    print("Permission to use camera denied.")
-                    return
-                }
-                self.sessionQueue.async {
-                    self.configureCaptureSession({ success in
-                        guard success else { return }
-                        self.isCaptureSessionConfigured = true
-                        self.captureSession.startRunning()
-                        DispatchQueue.main.async {
-                            self.previewView.updateVideoOrientationForDeviceOrientation()
-                        }
-                    })
-                }
-            })
-        }
-    }
-
-    override func viewWillDisappear(_ animated: Bool) {
-        super.viewWillDisappear(animated)
-
-        if captureSession.isRunning {
-            captureSession.stopRunning()
         }
     }
 
@@ -120,114 +77,26 @@ class ViewController: UIViewController, AVCapturePhotoCaptureDelegate {
         }
     }
 
-
-    func defaultDevice() -> AVCaptureDevice {
-        if let device = AVCaptureDevice.defaultDevice(withMediaType: AVMediaTypeVideo) {
-            return device
-        } else {
-            fatalError("All supported devices are expected to have at least one of the queried capture devices.")
+    func performImageRecognition(_ image: UIImage) {
+        if let tesseract = G8Tesseract(language: "eng") {
+            tesseract.engineMode = .tesseractCubeCombined
+            tesseract.pageSegmentationMode = .auto
+            tesseract.image = image.g8_blackAndWhite()
+            tesseract.recognize()
+            textView.text = tesseract.recognizedText
         }
+
+        activityIndicator.stopAnimating()
     }
 
-    func configureCaptureSession(_ completionHandler: ((_ success: Bool) -> Void)) {
-        var success = false
-        defer { completionHandler(success) } // Ensure all exit paths call completion handler.
-
-        // Get video input for the default camera.
-        let videoCaptureDevice = defaultDevice()
-        guard let videoInput = try? AVCaptureDeviceInput(device: videoCaptureDevice) else {
-            print("Unable to obtain video input for default camera.")
-            return
-        }
-
-        // Create and configure the photo output.
-        let capturePhotoOutput = AVCapturePhotoOutput()
-        capturePhotoOutput.isHighResolutionCaptureEnabled = true
-        capturePhotoOutput.isLivePhotoCaptureEnabled = false
-
-        // Make sure inputs and output can be added to session.
-        guard self.captureSession.canAddInput(videoInput) else { return }
-        guard self.captureSession.canAddOutput(capturePhotoOutput) else { return }
-
-        // Configure the session.
-        self.captureSession.beginConfiguration()
-        self.captureSession.sessionPreset = AVCaptureSessionPresetPhoto
-        self.captureSession.addInput(videoInput)
-        self.captureSession.addOutput(capturePhotoOutput)
-        self.captureSession.commitConfiguration()
-
-        self.capturePhotoOutput = capturePhotoOutput
-
-        success = true
+    @IBAction func getPhoto(_ sender: Any) {
+        presentImagePicker()
     }
 
-    func snapPhoto() {
-        guard let capturePhotoOutput = self.capturePhotoOutput else { return }
-        let videoPreviewLayerOrientation = previewView.videoPreviewLayer.connection.videoOrientation
-        self.sessionQueue.async {
-            // Update the photo output's connection to match the video orientation of the video preview layer.
-            if let photoOutputConnection = capturePhotoOutput.connection(withMediaType: AVMediaTypeVideo) {
-                photoOutputConnection.videoOrientation = videoPreviewLayerOrientation
-            }
-
-            var photoSettings = AVCapturePhotoSettings()
-            if !self.capturePhotoOutput.availablePhotoPixelFormatTypes.isEmpty {
-                var pixelFormatType = NSNumber(value: kCVPixelFormatType_48RGB)
-                if !self.capturePhotoOutput.availablePhotoPixelFormatTypes.contains(pixelFormatType) {
-                    pixelFormatType = self.capturePhotoOutput.availablePhotoPixelFormatTypes.first!
-                }
-                photoSettings = AVCapturePhotoSettings(
-                    format: [kCVPixelBufferPixelFormatTypeKey as String: pixelFormatType]
-                )
-            }
-            photoSettings.isAutoStillImageStabilizationEnabled = true
-            photoSettings.isHighResolutionPhotoEnabled = true
-            photoSettings.flashMode = .auto
-
-            capturePhotoOutput.capturePhoto(with: photoSettings, delegate: self)
-        }
-    }
-
-    func capture(_ captureOutput: AVCapturePhotoOutput,
-                 didFinishProcessingPhotoSampleBuffer photoSampleBuffer: CMSampleBuffer?,
-                 previewPhotoSampleBuffer: CMSampleBuffer?,
-                 resolvedSettings: AVCaptureResolvedPhotoSettings,
-                 bracketSettings: AVCaptureBracketedStillImageSettings?,
-                 error: Error?) {
-        guard error == nil, let photoSampleBuffer = photoSampleBuffer else {
-            print("Error capturing photo: \(String(describing: error))")
-            return
-        }
-
-        self.photoSampleBuffer = photoSampleBuffer
-    }
-
-    func capture(_ captureOutput: AVCapturePhotoOutput,
-                 didFinishCaptureForResolvedSettings resolvedSettings: AVCaptureResolvedPhotoSettings,
-                 error: Error?) {
-        guard error == nil else {
-            print("Error in capture process: \(String(describing: error))")
-            return
-        }
-        guard let cvPixelBuffer = CMSampleBufferGetImageBuffer(self.photoSampleBuffer) else {
-            print("photoSampleBuffer does not contain a CVPixelBuffer.")
-            return
-        }
-
-        // Create a Core Image image from the pixel buffer and apply a filter.
-        let orientationMap: [AVCaptureVideoOrientation : CGImagePropertyOrientation] = [
-            .portrait           : .right,
-            .portraitUpsideDown : .left,
-            .landscapeLeft      : .down,
-            .landscapeRight     : .up,
-            ]
-        let imageOrientation = Int32(orientationMap[previewView.videoPreviewLayer.connection.videoOrientation]!.rawValue)
-        let ciImage = CIImage(cvPixelBuffer: cvPixelBuffer).applyingOrientation(imageOrientation)
-        let uiImage = UIImage(ciImage: ciImage)
-
-    }
-
+    @IBOutlet weak var activityIndicator: UIActivityIndicatorView!
     @IBOutlet weak var previewView: PreviewView!
+    @IBOutlet weak var textView: UITextView!
+    @IBOutlet weak var getPhotoButton: UIButton!
 }
 
 extension ViewController: UINavigationControllerDelegate {
@@ -235,7 +104,7 @@ extension ViewController: UINavigationControllerDelegate {
 
 extension ViewController: UIImagePickerControllerDelegate {
     func presentImagePicker() {
-        let imagePickerActionSheet = UIAlertController(title: "Choose Image",
+        let imagePickerActionSheet = UIAlertController(title: "Get Image",
                                                        message: nil,
                                                        preferredStyle: .actionSheet)
 
@@ -250,7 +119,7 @@ extension ViewController: UIImagePickerControllerDelegate {
             imagePickerActionSheet.addAction(cameraButton)
         }
 
-        let libraryButton = UIAlertAction(title: "Choose Existing",
+        let libraryButton = UIAlertAction(title: "Use Existing",
                                           style: .default) { (alert) -> Void in
                                             let imagePicker = UIImagePickerController()
                                             imagePicker.delegate = self
@@ -258,11 +127,21 @@ extension ViewController: UIImagePickerControllerDelegate {
                                             self.present(imagePicker, animated: true)
         }
         imagePickerActionSheet.addAction(libraryButton)
-        // 2
+
         let cancelButton = UIAlertAction(title: "Cancel", style: .cancel)
         imagePickerActionSheet.addAction(cancelButton)
-        // 3
+
         present(imagePickerActionSheet, animated: true)
+    }
+
+    func imagePickerController(_ picker: UIImagePickerController,
+                               didFinishPickingMediaWithInfo info: [String : Any]) {
+        if let selectedPhoto = info[UIImagePickerControllerOriginalImage] as? UIImage {
+            activityIndicator.startAnimating()
+            dismiss(animated: true, completion: {
+                self.performImageRecognition(selectedPhoto)
+            })
+        }
     }
 }
 
