@@ -12,7 +12,12 @@ import Photos
 import TesseractOCR
 
 
-class ViewController: UIViewController, AVCapturePhotoCaptureDelegate {
+class ViewController: UIViewController {
+    var selectedImage: UIImage?
+    var currentSearch = ""
+    var tesseract: G8Tesseract?
+    var recognizedSelectedImage = false
+
     override func viewDidLoad() {
         super.viewDidLoad()
 
@@ -77,26 +82,88 @@ class ViewController: UIViewController, AVCapturePhotoCaptureDelegate {
         }
     }
 
-    func performImageRecognition(_ image: UIImage) {
-        if let tesseract = G8Tesseract(language: "eng") {
-            tesseract.engineMode = .tesseractCubeCombined
-            tesseract.pageSegmentationMode = .auto
-            tesseract.image = image.g8_blackAndWhite()
-            tesseract.recognize()
-            textView.text = tesseract.recognizedText
-        }
+    func performImageRecognition() {
+        if let image = selectedImage, let newTesseract = G8Tesseract(language: "eng", engineMode: .tesseractCubeCombined) {
+            progressbar.setProgress(0.2, animated: false)
+            progressbar.isHidden = false
 
-        activityIndicator.stopAnimating()
+            tesseract = newTesseract
+            tesseract!.delegate = self
+            tesseract!.pageSegmentationMode = .auto
+            tesseract!.image = image.g8_blackAndWhite()
+            DispatchQueue.global().async {
+                if self.tesseract!.recognize() {
+                    print("SUCCEEDED")
+                    self.recognizedSelectedImage = true
+                } else {
+                    print("FAILED")
+                }
+
+                DispatchQueue.main.async {
+                    self.progressbar.isHidden = true
+                    self.drawBlocks()
+                }
+            }
+        }
+    }
+
+    func drawBlocks() {
+        if recognizedSelectedImage, let image = selectedImage {
+            UIGraphicsBeginImageContext(image.size)
+            if let context = UIGraphicsGetCurrentContext() {
+                image.draw(at: CGPoint.zero)
+
+                context.setLineWidth(1.0)
+                context.setStrokeColor(UIColor.blue.cgColor)
+                let blocks = tesseract?.recognizedBlocks(by: .symbol) as! [G8RecognizedBlock]
+                for block: G8RecognizedBlock in blocks {
+                    context.stroke(block.boundingBox(atImageOf: image.size))
+                }
+
+                imageView.image = UIGraphicsGetImageFromCurrentImageContext()
+            }
+            UIGraphicsEndImageContext()
+        }
     }
 
     @IBAction func getPhoto(_ sender: Any) {
         presentImagePicker()
     }
 
-    @IBOutlet weak var activityIndicator: UIActivityIndicatorView!
-    @IBOutlet weak var previewView: PreviewView!
-    @IBOutlet weak var textView: UITextView!
-    @IBOutlet weak var getPhotoButton: UIButton!
+    @IBAction func tap(_ sender: Any) {
+        searchBar.endEditing(true)
+    }
+
+    @IBOutlet weak var searchBar: UISearchBar!
+    @IBOutlet weak var imageView: UIImageView!
+    @IBOutlet weak var progressbar: UIProgressView!
+}
+
+extension ViewController: G8TesseractDelegate {
+    func progressImageRecognition(for tesseract: G8Tesseract!) {
+        DispatchQueue.main.async {
+            self.progressbar.setProgress(Float(tesseract.progress) / 100.0, animated: true)
+        }
+    }
+
+    func shouldCancelImageRecognition(for tesseract: G8Tesseract!) -> Bool {
+        return false
+    }
+}
+
+extension ViewController: UISearchBarDelegate {
+    func searchBar(_ searchBar: UISearchBar, textDidChange searchText: String) {
+        self.currentSearch = searchText
+        self.drawBlocks()
+    }
+
+    func searchBarSearchButtonClicked(_ searchBar: UISearchBar) {
+        searchBar.endEditing(true)
+    }
+
+    func searchBarTextDidEndEditing(_ searchBar: UISearchBar) {
+        searchBar.endEditing(true)
+    }
 }
 
 extension ViewController: UINavigationControllerDelegate {
@@ -136,12 +203,17 @@ extension ViewController: UIImagePickerControllerDelegate {
 
     func imagePickerController(_ picker: UIImagePickerController,
                                didFinishPickingMediaWithInfo info: [String : Any]) {
-        if let selectedPhoto = info[UIImagePickerControllerOriginalImage] as? UIImage {
-            activityIndicator.startAnimating()
-            dismiss(animated: true, completion: {
-                self.performImageRecognition(selectedPhoto)
-            })
+        if let selectedImage = info[UIImagePickerControllerOriginalImage] as? UIImage {
+            self.recognizedSelectedImage = false
+            self.selectedImage = selectedImage
+            self.imageView.image = selectedImage
+
+            dismiss(animated: true) {
+                self.performImageRecognition()
+            }
         }
     }
 }
+
+
 
